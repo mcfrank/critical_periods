@@ -1,0 +1,407 @@
+---
+title: "Hartshorne Tenenbaum Pinker (2018) Spotligth"
+author: "Mike Frank"
+date: "May 5th, 2018"
+output: html_document
+---
+
+This document contains some explorations of HTP's 2018 paper on critical periods, including the reproducibility code for a figure in my TiCS spotlight paper. 
+
+Note that it depends on data from the HTP paper OSF repository and also on running a fairly time-consuming MIRT model. 
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggrepel)
+library(mirtCAT)
+library(viridis)
+library(ggthemes)
+```
+
+# Initial data evaluation
+
+```{r}
+d <- read_csv("data.csv")
+```
+
+
+Number of people at ceiling. 
+
+```{r}
+mean(d$correct >= .96)
+```
+
+
+```{r}
+qplot(d$age)
+```
+
+```{r}
+qplot(d$Eng_start)
+```
+
+```{r}
+qplot(d$Eng_country_yrs)
+```
+
+# Basic reproduction of plots
+
+break down by monolingual, immersion, non-immersion
+
+```{r}
+ms <- d %>%
+  mutate(start_binned = cut(Eng_start, c(0,seq(1,50,5), 75), 
+                            include.lowest = TRUE)) %>%
+  group_by(age, start_binned) %>%
+  summarise(correct = mean(correct), 
+            n = n())
+
+ggplot(ms,  
+       aes(x = age, y = correct, col = start_binned)) +
+  geom_line() + 
+  geom_point(aes(size = n), alpha = .2) + 
+  # geom_smooth(aes(group = start_binned), se=FALSE, span = 1) + 
+  theme_few() 
+```
+
+Just monolinguals
+
+```{r}
+ms <- d %>%
+  mutate(status = ifelse(natlangs == "English" & primelangs == "English" &
+         Eng_start == 0, "monolingual","non")) %>%
+  group_by(age, gender, education, Eng_little) %>%
+  summarise(correct = mean(correct), 
+            n = n()) %>%
+  filter(n > 30)
+
+
+ggplot(filter(ms, gender %in% c("female","male")),  
+       aes(x = age, y = correct, col = education)) +
+  # geom_line() + 
+  geom_point(aes(size = log10(n)), alpha = .2) + 
+  facet_grid(Eng_little~gender) +
+  geom_smooth(aes(group = education), se=FALSE, span = 1) +
+  theme_few() +
+  scale_color_discrete(name = "Initial Exposure Age") +
+  xlab("Age") + 
+  ylab("Mean Correct") +
+  theme(legend.position = "bottom")
+```
+
+# Psychometric modeling
+
+Fit 4 parameter IRT model to full dataset via mirtCAT (cached, takes many minutes). 
+
+```{r, eval = FALSE}
+library(mirtCAT)
+
+d_mat <- d %>%
+  select(starts_with("q")) %>% 
+  data.frame %>%
+  data.matrix
+
+d_mat <- d_mat[complete.cases(d_mat),]
+
+mod_4pl <- mirt(d_mat, 1, itemtype='4PL', verbose=TRUE)
+
+coefs_4pl <- as_data_frame(coef(mod_4pl, simplify = TRUE)$items)
+fscores_4pl <- fscores(mod_4pl, method = "MAP")[,1]
+
+save(file = "mod_4pl.Rds", "mod_4pl","fscores_4pl", "coefs_4pl")
+
+```
+
+Load cache. 
+
+```{r}
+load("mod_4pl.Rds")
+d$fscore <- fscores_4pl
+```
+
+Examine item performance.
+
+```{r}
+coefs_4pl$name <- d %>% select(starts_with("q")) %>% names()
+
+ggplot(coefs_4pl,  
+       aes(x = a1, y = d)) + 
+  geom_point() + 
+  geom_label_repel(data = filter(coefs_4pl, a1 > 10 | d > 10), 
+                                 aes(label = name)) + 
+  xlab("Discrimination") + 
+  ylab("Difficulty")
+```
+
+```{r}
+ggplot(coefs_4pl,  
+       aes(x = g, y = u)) + 
+  geom_point() + 
+  geom_label_repel(data = filter(coefs_4pl, u < .92), 
+                                 aes(label = name)) + 
+  xlab("Lower bound (guessing)") + 
+  ylab("Upper bound (ceiling)") + 
+  xlim(0,1) + 
+  ylim(0,1)
+```
+
+Look at item characteristic curves for some of the odd items.
+
+```{r}
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q2"))
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q34_4"))
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q33_5"))
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q29_3"))
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q29_1"))
+itemplot(mod_4pl, which(coefs_4pl$name %in% "q1"))
+```
+
+Look at correct answer distributions
+
+```{r}
+d <- d %>%
+  mutate(education = factor(education,
+                            levels = c("Graduate Degree",
+                                       "Some Graduate School",
+                                       "Undergraduate Degree (3-5 years higher ed)",
+                                       "Some Undergrad (higher ed)",
+                                       "High School Degree (12-13 years)",
+                                       "Didn't Finish High School (less than 13 years ed)"),
+                            labels = c("Graduate","Some Graduate","College", 
+                                       "Some College",
+                                       "High School","< High School")))
+
+d_hist <- d %>%
+  mutate(Eng_little = ifelse(!is.na(Eng_little), Eng_little, "other"), 
+         language_status = fct_relevel(
+           fct_recode(Eng_little, 
+                      Bilingual = "bileng",
+                      Monolingual = "monoeng", 
+                      `High Immersion` = "lot",
+                      `Low Immersion` = "little", 
+                      `Moderate Immersion` = "other"),
+           "Monolingual","Bilingual", 
+           "High Immersion", 
+           "Moderate Immersion","Low Immersion"))
+                
+ggplot(d_hist, 
+       aes(x = correct, fill = language_status)) + 
+  geom_histogram() + 
+  theme_few() + 
+  scale_fill_ptol(name = "Language Status") + 
+  scale_y_continuous(name = "Number of participants", 
+                     breaks = c(1e5,2e5,3e5,4e5)) +
+  xlab("Proportion correct") + 
+  theme(legend.position = "bottom") + 
+  guides(fill=guide_legend(ncol=3))
+```
+
+and latent ability. 
+
+```{r}
+ggplot(d_hist, 
+       aes(x = fscore, fill = language_status)) + 
+  geom_histogram(binwidth = .25) + 
+  theme_few() + 
+  scale_fill_ptol(name = "Language Status") + 
+  scale_y_continuous(name = "Number of participants", 
+                     breaks = c(1e5,2e5,3e5,4e5)) +
+  xlab("Latent ability") + 
+  xlim(-3.5, .8) + 
+  theme(legend.position = "bottom") + 
+  guides(fill=guide_legend(ncol=3))
+```
+
+
+Now facet by language status. First show proportion correct. 
+
+```{r}
+ggplot(d_hist,
+       aes(x = correct, fill = language_status)) + 
+  geom_histogram() + 
+  facet_wrap(~ language_status, scales = "free_y") + 
+  theme_few() + 
+  scale_fill_ptol(name = "Language Status") + 
+  scale_y_continuous(name = "Number of participants") +
+  xlab("Proportion correct") + 
+  theme(legend.position = "bottom") + 
+  guides(fill = guide_legend(ncol = 3))
+```
+
+Then F score. 
+
+```{r}
+ggplot(d_hist,
+       aes(x = fscore, fill = language_status)) + 
+  geom_histogram() + 
+  facet_wrap(~language_status, scales = "free_y") + 
+  theme_few() + 
+  scale_fill_ptol(name = "Language Status") + 
+  scale_y_continuous(name = "Number of participants") +
+  xlab("Latent ability") + 
+  theme(legend.position = "bottom") + 
+  guides(fill=guide_legend(ncol = 3))
+```
+
+By education.
+
+```{r}
+ggplot(filter(d_hist, !is.na(education)),
+       aes(x = fscore, fill = education)) + 
+  geom_histogram(binwidth = .25) + 
+  facet_wrap(~language_status, scales = "free_y") + 
+  theme_few() + 
+  scale_fill_viridis(name = "Language Status", discrete = TRUE) + 
+  scale_y_continuous(name = "Number of participants") +
+  xlim(-3.5,.8) + 
+  xlab("Latent ability") + 
+  theme(legend.position = "bottom") + 
+  guides(fill=guide_legend(ncol = 3)) 
+```
+
+
+
+```{r}
+d_hist_long <- d_hist %>% 
+  select(fscore, correct, language_status) %>%
+  gather(measure, value, fscore, correct) %>%
+  mutate(measure = factor(measure, 
+                        levels = c("correct","fscore"), 
+                        labels = c("Raw proportion correct", "Latent ability (IRT)")))
+
+ggplot(d_hist_long,
+       aes(x = value, fill = language_status)) + 
+  geom_histogram() + 
+  facet_grid(measure~language_status, scales = "free_x") + 
+  theme_few() + 
+  scale_fill_ptol(name = "Language Status") + 
+  scale_y_continuous(name = "Number of participants") +
+  xlab("Measure") + 
+  theme(legend.position = "bottom") + 
+  guides(fill=guide_legend(ncol=3))
+```
+
+
+
+Plot latent abilities in the same way we plot the data generally. 
+
+```{r}
+ms <- d %>%
+  mutate(start_binned = cut(Eng_start, c(0, 1, 5, 10, 20, 100), 
+                            include.lowest = TRUE), 
+         immersion_pct = ifelse(!is.na(Eng_country_yrs), 
+                                Eng_country_yrs / (age - Eng_start), 1),
+         immersion_binned = cut(immersion_pct, c(0,.1, .9, 1.01), 
+                            include.lowest = TRUE)) %>%
+  group_by(age, start_binned, immersion_binned) %>%
+  summarise(theta = mean(fscore), 
+            n = n()) %>%
+  filter(n > 30)
+
+ggplot(ms,  
+       aes(x = age, y = theta, col = start_binned)) +
+  # geom_line() + 
+  geom_point(aes(size = log10(n)), alpha = .2) + 
+  facet_wrap(~immersion_binned) + 
+  geom_smooth(aes(group = start_binned), se=FALSE, span = .75) +
+  theme_few() +
+  scale_color_discrete(name = "Initial Exposure Age") +
+  xlab("Age") + 
+  ylab("Latent Ability (IRT theta)") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+ms <- d %>%
+  mutate(start_binned = cut(Eng_start, c(0, 1, 5, 10, 20, 100), 
+                            include.lowest = TRUE), 
+         Eng_little = ifelse(!is.na(Eng_little), Eng_little, "other"), 
+         language_status = fct_relevel(fct_recode(Eng_little, 
+                                      Immersion = "bileng",
+                                      Immersion = "monoeng", 
+                                      Immersion = "lot",
+                                      `Non-Immersion` = "little", 
+                                      Other = "other"),
+                                      "Immersion","Other")) %>%
+  group_by(age, start_binned, language_status, education) %>%
+  summarise(correct = mean(correct), 
+            theta= mean(fscore),
+            n = n()) %>%
+  filter(n > 10)
+
+ggplot(ms,  
+       aes(x = age, y = correct, col = start_binned)) +
+  # geom_line() + 
+  geom_point(aes(size = log10(n)), alpha = .2) + 
+  facet_grid(education~language_status) + 
+  geom_smooth(aes(group = start_binned), se=FALSE, span = 1) +
+  theme_few() +
+  scale_color_discrete(name = "Initial Exposure Age") +
+  xlab("Age") + 
+  ylab("Mean Correct") +
+  theme(legend.position = "bottom")
+```
+
+Zoom in on monolinguals.
+
+```{r}
+ms <- d %>%
+  group_by(age, Eng_little, education) %>%
+  summarise(correct = mean(correct), 
+            theta= mean(fscore),
+            n = n()) %>%
+  filter(n > 10)
+
+ggplot(filter(ms, Eng_little == "monoeng", !is.na(education)),  
+       aes(x = age, y = theta, col = education)) +
+  # geom_line() + 
+  geom_point(aes(size = log10(n)), alpha = .2) + 
+  # facet_grid(education~language_status) + 
+  geom_smooth(aes(group = education), se=FALSE, span = .75) +
+  theme_few() +
+  # scale_color_discrete(name = "Initial Exposure Age") +
+  xlab("Age at Test") + 
+  ylab("Latent Ability") +
+  scale_color_ptol(name = "Education") + 
+  theme(legend.position = "bottom", ) + 
+  guides(color=guide_legend(ncol=2)) + 
+  ylim(-.25, .5)
+
+```
+
+# Plot for TiCS spotlight
+
+```{r}
+a <- ggplot(d_hist, 
+       aes(x = fscore, fill = language_status)) + 
+  geom_histogram(binwidth = .25) + 
+  theme_few() + 
+  scale_fill_ptol(name = "") + 
+  scale_y_continuous(name = "Number of Participants", 
+                     breaks = c(1e5,2e5,3e5,4e5)) +
+  xlab("Latent Ability (IRT Model Parameter)") + 
+  xlim(-3.5, .8) + 
+  theme(legend.position = "bottom") + 
+  guides(fill = guide_legend(ncol = 2))
+
+b <- ggplot(filter(ms, Eng_little == "monoeng", 
+                   !is.na(education), education != "< High School"),  
+       aes(x = age, y = theta, col = education)) +
+  # geom_line() + 
+  geom_point(aes(size = log10(n)), alpha = .2) + 
+  geom_smooth(aes(group = education), se = FALSE, span = .6) +
+  theme_few() +
+  xlab("Age at Test (Years)") + 
+  ylab("Latent Ability") +
+  scale_size_continuous(guide = FALSE) + 
+  scale_color_viridis(name = "", discrete = TRUE) + 
+  theme(legend.position = "bottom") + 
+  guides(color = guide_legend(ncol = 2)) + 
+  ylim(-.25, .5)
+
+# pdf("HTP.pdf", width = 8, height = 4)
+cowplot::plot_grid(a,b, labels = c("A","B"))
+# dev.off()
+```
+
